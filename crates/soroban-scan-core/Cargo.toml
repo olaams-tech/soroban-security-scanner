@@ -9,6 +9,13 @@ homepage.workspace = true
 description = "Core analysis engine for the Soroban Security Scanner (deterministic, evidence-based)."
 readme = "../../README.md"
 
+[features]
+default = []
+# Opt-in network transport for model-backed providers. This feature is absent
+# from the default build on purpose: the scanner performs no network access
+# unless a provider is explicitly compiled in and configured.
+ai-http = ["dep:ureq", "dep:url"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
@@ -22,3 +29,5 @@ walkdir.workspace = true
 globset.workspace = true
 sha2.workspace = true
 hex.workspace = true
+ureq = { workspace = true, optional = true }
+url = { workspace = true, optional = true }

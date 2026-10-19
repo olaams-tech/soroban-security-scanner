@@ -39,7 +39,7 @@ pub enum OutputFormat {
     Sarif,
     /// Markdown report.
     Markdown,
-    /// GitHub Actions workflow-command annotations.
+    /// GitHub Actions workflow annotations (`::error`, `::warning`, `::notice`).
     Github,
 }
 
@@ -108,10 +108,63 @@ pub fn summary_line(findings: &[Finding]) -> String {
     )
 }
 
-/// Renders the terminal report.
+/// ANSI color policy for human-readable terminal output.
+///
+/// Color is opt-in and never applied to JSON, SARIF, Markdown, or GitHub
+/// annotations. Keeping this as a value (rather than reading the environment
+/// during rendering) makes the decision testable and keeps machine output
+/// deterministic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalColor {
+    enabled: bool,
+}
+
+impl TerminalColor {
+    /// Creates a color policy.
+    pub fn new(enabled: bool) -> Self {
+        TerminalColor { enabled }
+    }
+
+    /// Plain, unstyled text.
+    pub const PLAIN: Self = TerminalColor { enabled: false };
+
+    /// Whether ANSI escapes are emitted.
+    pub fn is_enabled(self) -> bool {
+        self.enabled
+    }
+
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.enabled {
+            format!("\u{1b}[{code}m{text}\u{1b}[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn severity(self, severity: Severity, padded: &str) -> String {
+        let code = match severity {
+            Severity::Critical => "1;31",
+            Severity::High => "31",
+            Severity::Medium => "33",
+            Severity::Low => "36",
+            Severity::Info => "2",
+        };
+        self.paint(code, padded)
+    }
+}
+
+/// Renders the terminal report without color.
 pub fn render_terminal(outcome: &ScanOutcome) -> String {
+    render_terminal_with_color(outcome, TerminalColor::PLAIN)
+}
+
+/// Renders the terminal report, optionally with ANSI colors.
+pub fn render_terminal_with_color(outcome: &ScanOutcome, color: TerminalColor) -> String {
     let mut out = String::new();
-    out.push_str(&format!("{TOOL_NAME} {}\n", crate::VERSION));
+    out.push_str(&format!(
+        "{}\n",
+        color.paint("1", &format!("{TOOL_NAME} {}", crate::VERSION))
+    ));
     out.push_str(&format!(
         "Project: {} ({})\n",
         outcome.project.root.display(),
@@ -129,9 +182,10 @@ pub fn render_terminal(outcome: &ScanOutcome) -> String {
         out.push_str("No security findings.\n");
     } else {
         for finding in &outcome.findings {
+            let label = format!("{:<8}", finding.severity.as_str().to_ascii_uppercase());
             out.push_str(&format!(
-                "{:<8} {:<7} {}\n",
-                finding.severity.as_str().to_ascii_uppercase(),
+                "{} {:<7} {}\n",
+                color.severity(finding.severity, &label),
                 finding.rule_id,
                 finding.location.display_label()
             ));
@@ -149,9 +203,13 @@ pub fn render_terminal(outcome: &ScanOutcome) -> String {
             outcome.suppressed.len()
         ));
         for suppressed in &outcome.suppressed {
+            let label = format!(
+                "{:<8}",
+                suppressed.finding.severity.as_str().to_ascii_uppercase()
+            );
             out.push_str(&format!(
-                "  {:<8} {:<7} {}\n",
-                suppressed.finding.severity.as_str().to_ascii_uppercase(),
+                "  {} {:<7} {}\n",
+                color.severity(suppressed.finding.severity, &label),
                 suppressed.finding.rule_id,
                 suppressed.finding.location.display_label()
             ));
@@ -185,13 +243,18 @@ pub fn render_terminal(outcome: &ScanOutcome) -> String {
     out
 }
 
-/// Renders a compact terminal report (one line per finding).
+/// Renders a compact terminal report (one line per finding) without color.
 pub fn render_terminal_compact(outcome: &ScanOutcome) -> String {
+    render_terminal_compact_with_color(outcome, TerminalColor::PLAIN)
+}
+
+/// Renders a compact terminal report, optionally with ANSI colors.
+pub fn render_terminal_compact_with_color(outcome: &ScanOutcome, color: TerminalColor) -> String {
     let mut out = String::new();
     for finding in &outcome.findings {
         out.push_str(&format!(
             "{} {} {}\n",
-            finding.severity.as_str(),
+            color.severity(finding.severity, finding.severity.as_str()),
             finding.rule_id,
             finding.location.display_label()
         ));
@@ -1017,5 +1080,148 @@ mod tests {
         let text = render_markdown(&outcome);
         assert!(text.contains("## Suppressed findings"));
         assert!(text.contains("reviewed by the security team"));
+    }
+
+    #[test]
+    fn terminal_color_is_opt_in() {
+        let (outcome, _) = sample();
+        assert!(!render_terminal(&outcome).contains('\u{1b}'));
+        assert!(!render_terminal_compact(&outcome).contains('\u{1b}'));
+
+        let colored = render_terminal_with_color(&outcome, TerminalColor::new(true));
+        assert!(colored.contains('\u{1b}'), "expected ANSI escapes");
+        assert!(colored.contains("\u{1b}[31m"), "high should be red");
+
+        let colored = render_terminal_compact_with_color(&outcome, TerminalColor::new(true));
+        assert!(colored.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn machine_formats_never_contain_ansi_escapes() {
+        let (outcome, registry) = sample();
+        assert!(!render_json(&outcome).unwrap().contains('\u{1b}'));
+        assert!(!render_sarif(&outcome, &registry).contains('\u{1b}'));
+        assert!(!render_markdown(&outcome).contains('\u{1b}'));
+        assert!(!render_github(&outcome).contains('\u{1b}'));
+    }
+
+    fn malicious_outcome() -> ScanOutcome {
+        let (mut outcome, _) = sample();
+        let meta = crate::rule::RuleMetadata::new(
+            "SS-001",
+            "Title",
+            "fixture rule",
+            crate::category::Category::Authorization,
+            Severity::High,
+            crate::confidence::Confidence::High,
+            "fix it",
+        );
+        let mut finding = Finding::new(
+            &meta,
+            crate::finding::SourceLocation::new(
+                "src/a,b:c\n::error file=evil.rs,line=1::owned.rs",
+                42,
+            ),
+            "100% bad\r\n::error file=evil.rs,line=1::injected",
+        );
+        finding.title = "title, with: separators\n::warning::injected".to_string();
+        outcome.findings = vec![finding];
+        outcome
+    }
+
+    #[test]
+    fn github_annotations_escape_paths_titles_and_evidence() {
+        let outcome = malicious_outcome();
+        let text = render_github(&outcome);
+        assert_eq!(
+            text.lines().count(),
+            1,
+            "one finding must produce exactly one annotation line"
+        );
+        assert!(text.starts_with("::error "));
+        assert!(text.contains("%0A"), "newlines must be escaped");
+        assert!(text.contains("%0D"), "carriage returns must be escaped");
+        assert!(text.contains("%25"), "percent signs must be escaped");
+        assert!(text.contains("%3A"), "colons must be escaped in properties");
+        assert!(text.contains("%2C"), "commas must be escaped in properties");
+        assert!(
+            !text.contains("\n::error file=evil"),
+            "crafted input must not start a new workflow command"
+        );
+        assert!(
+            !text.contains("\r"),
+            "no raw carriage returns may reach the workflow command"
+        );
+    }
+
+    #[test]
+    fn github_annotation_levels_match_severity() {
+        let (mut outcome, _) = sample();
+        let severities = [
+            (Severity::Critical, "::error "),
+            (Severity::High, "::error "),
+            (Severity::Medium, "::warning "),
+            (Severity::Low, "::notice "),
+            (Severity::Info, "::notice "),
+        ];
+        let mut expected = Vec::new();
+        for (severity, prefix) in severities {
+            outcome.findings[0].severity = severity;
+            let text = render_github(&outcome);
+            assert!(text.starts_with(prefix), "got: {text}");
+            expected.push(prefix);
+        }
+        assert_eq!(expected.len(), 5);
+    }
+
+    #[test]
+    fn github_annotations_survive_fuzzed_source_text() {
+        // Deterministic, dependency-free fuzz loop. The alphabet is chosen to
+        // hit workflow separators, escape characters, and shell metacharacters.
+        const ALPHABET: &[char] = &[
+            '%', ':', ',', '\r', '\n', '$', '(', ')', '`', '"', '\'', '\\', ';', '&', '|', '{',
+            '}', '[', ']', '=', ' ', 'a', 'Z', '0',
+        ];
+        let (mut outcome, _) = sample();
+        let mut seed = 0x5eed_1234_u64;
+        for _ in 0..256 {
+            let mut next = || {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ALPHABET[((seed >> 33) as usize) % ALPHABET.len()]
+            };
+            let path: String = (0..24).map(|_| next()).collect();
+            let title: String = (0..24).map(|_| next()).collect();
+            let evidence: String = (0..48).map(|_| next()).collect();
+            let mut finding = outcome.findings[0].clone();
+            finding.location.file = std::path::PathBuf::from(format!("src/{path}.rs"));
+            finding.title = title;
+            finding.evidence = evidence;
+            outcome.findings = vec![finding];
+
+            let text = render_github(&outcome);
+            assert_eq!(text.lines().count(), 1, "got: {text:?}");
+            assert!(text.starts_with("::error "), "got: {text:?}");
+            assert!(!text.contains('\r'), "got: {text:?}");
+            assert_eq!(
+                text.matches('\n').count(),
+                1,
+                "annotations must be a single line: {text:?}"
+            );
+            // Every literal percent must start a valid workflow escape.
+            let bytes = text.as_bytes();
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte == b'%' {
+                    let rest = &text[index + 1..];
+                    assert!(
+                        rest.starts_with("25")
+                            || rest.starts_with("0A")
+                            || rest.starts_with("0D")
+                            || rest.starts_with("3A")
+                            || rest.starts_with("2C"),
+                        "unescaped percent in: {text:?}"
+                    );
+                }
+            }
+        }
     }
 }

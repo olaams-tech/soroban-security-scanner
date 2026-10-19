@@ -95,6 +95,17 @@ impl From<FormatArg> for OutputFormat {
     }
 }
 
+/// Argument value for `--color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ColorArg {
+    /// Color only when stdout is an interactive terminal and `NO_COLOR` is unset.
+    Auto,
+    /// Always color human-readable terminal output.
+    Always,
+    /// Never emit ANSI escapes.
+    Never,
+}
+
 /// Argument value for `--fail-on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum FailOnArg {
@@ -260,9 +271,14 @@ struct ScanArgs {
     verbose: bool,
 
     /// Page long terminal reports through `$PAGER` (never affects JSON, SARIF,
-    /// or Markdown).
+    /// Markdown, or GitHub annotations).
     #[arg(long, value_enum, default_value_t = PagerArg::Auto)]
     pager: PagerArg,
+
+    /// Colorize human-readable terminal output. Machine formats never contain
+    /// ANSI escapes; `auto` respects `NO_COLOR` and non-TTY output.
+    #[arg(long, value_enum, default_value_t = ColorArg::Auto)]
+    color: ColorArg,
 }
 
 #[derive(Debug, Args)]
@@ -515,8 +531,15 @@ fn run_scan(args: ScanArgs, registry: &RuleRegistry) -> CliResult<u8> {
         }
     }
 
+    let color = report::TerminalColor::new(resolve_color(
+        args.color,
+        args.format,
+        args.output.is_some(),
+    ));
     let rendered = if args.quiet && matches!(args.format, FormatArg::Terminal) {
-        report::render_terminal_compact(&outcome)
+        report::render_terminal_compact_with_color(&outcome, color)
+    } else if matches!(args.format, FormatArg::Terminal) {
+        report::render_terminal_with_color(&outcome, color)
     } else {
         report::render(&outcome, registry, args.format.into())
     };
@@ -599,6 +622,25 @@ fn print_report(rendered: &str, format: FormatArg, pager: PagerArg) -> CliResult
     }
     print!("{rendered}");
     Ok(())
+}
+
+/// Decides whether ANSI colors should be emitted for this invocation.
+///
+/// Colors are restricted to the human-readable terminal format. `auto` also
+/// requires an interactive stdout, a report that is not being written to a
+/// file, and the absence of `NO_COLOR`. `always` is an explicit override.
+fn resolve_color(choice: ColorArg, format: FormatArg, to_file: bool) -> bool {
+    if format != FormatArg::Terminal {
+        return false;
+    }
+    match choice {
+        ColorArg::Always => true,
+        ColorArg::Never => false,
+        ColorArg::Auto => {
+            use std::io::IsTerminal;
+            !to_file && std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+        }
+    }
 }
 
 /// Decides whether a rendered report should be paged.
@@ -1028,6 +1070,21 @@ mod tests {
             FormatArg::Github,
         ] {
             assert!(!should_page(PagerArg::Always, format, true, 1_000_000, 1));
+        }
+    }
+
+    #[test]
+    fn color_is_restricted_to_terminal_output() {
+        assert!(resolve_color(ColorArg::Always, FormatArg::Terminal, false));
+        assert!(!resolve_color(ColorArg::Never, FormatArg::Terminal, false));
+        assert!(!resolve_color(ColorArg::Auto, FormatArg::Terminal, true));
+        for format in [
+            FormatArg::Json,
+            FormatArg::Sarif,
+            FormatArg::Markdown,
+            FormatArg::Github,
+        ] {
+            assert!(!resolve_color(ColorArg::Always, format, false));
         }
     }
 }

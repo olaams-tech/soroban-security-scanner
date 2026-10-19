@@ -23,8 +23,13 @@ use crate::rule::RuleMetadata;
 use crate::severity::Severity;
 
 mod cache;
+mod redaction;
 
 pub use cache::{cache_key, AssistanceCache, CachedAssistant, CACHE_DIR, DEFAULT_MAX_ENTRIES};
+pub use redaction::{redact, HOME, REDACTED};
+
+#[cfg(feature = "ai-http")]
+pub mod http;
 
 /// Label prepended to all offline (non-model) guidance.
 pub const OFFLINE_LABEL: &str = "GUIDANCE (offline, rule-based)";
@@ -67,9 +72,21 @@ pub struct Explanation {
 }
 
 impl Explanation {
+    /// Creates an explanation with its text redacted.
+    pub fn new(text: impl Into<String>, ai_generated: bool, label: &'static str) -> Self {
+        Explanation {
+            text: redact(&text.into()),
+            ai_generated,
+            label,
+        }
+    }
+
     /// Renders the label and text.
+    ///
+    /// Redaction is applied again here so a provider that constructs
+    /// [`Explanation`] directly still cannot emit credentials or home paths.
     pub fn render(&self) -> String {
-        format!("{}\n\n{}", self.label, self.text)
+        format!("{}\n\n{}", self.label, redact(&self.text))
     }
 }
 
@@ -135,11 +152,7 @@ evidence. It is not an independent security judgment and does not change the \
 deterministic result.",
         );
 
-        Explanation {
-            text,
-            ai_generated: false,
-            label: OFFLINE_LABEL,
-        }
+        Explanation::new(text, false, OFFLINE_LABEL)
     }
 
     fn summarize(&self, findings: &[Finding]) -> Explanation {
@@ -178,11 +191,7 @@ deterministic result.",
 findings as review prompts rather than confirmed vulnerabilities.",
         );
 
-        Explanation {
-            text,
-            ai_generated: false,
-            label: OFFLINE_LABEL,
-        }
+        Explanation::new(text, false, OFFLINE_LABEL)
     }
 }
 
@@ -277,5 +286,63 @@ mod tests {
         let explanation = RuleGuidance.summarize(&findings);
         assert!(explanation.text.contains("1 deterministic findings"));
         assert!(explanation.text.contains("critical 0, high 1"));
+    }
+
+    #[test]
+    fn offline_guidance_redacts_secrets_and_home_paths() {
+        let mut finding = finding();
+        finding.description =
+            "leaked OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz and ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+                .to_string();
+        finding.evidence = "password = \"hunter2\"".to_string();
+        finding.remediation = "move /home/alice/project out of the prompt".to_string();
+        finding.location.file =
+            std::path::PathBuf::from("C:\\Users\\alice\\contracts\\src\\lib.rs");
+
+        let rendered = RuleGuidance
+            .explain_finding(&finding, Some(&meta()))
+            .render();
+        for secret in [
+            "sk-abcdefghijklmnopqrstuvwxyz",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "hunter2",
+            "alice",
+        ] {
+            assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
+        }
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains(HOME), "{rendered}");
+    }
+
+    struct LeakyProvider;
+
+    impl Assistant for LeakyProvider {
+        fn name(&self) -> &str {
+            "leaky"
+        }
+
+        fn explain_finding(&self, _finding: &Finding, _rule: Option<&RuleMetadata>) -> Explanation {
+            // A provider could construct Explanation without the constructor;
+            // rendering must still be a final redaction gate.
+            Explanation {
+                text: "token ghp_abcdefghijklmnopqrstuvwxyz0123456789 at /home/alice/project"
+                    .to_string(),
+                ai_generated: true,
+                label: AI_LABEL,
+            }
+        }
+
+        fn summarize(&self, _findings: &[Finding]) -> Explanation {
+            self.explain_finding(&finding(), None)
+        }
+    }
+
+    #[test]
+    fn provider_output_is_redacted_at_render_time() {
+        let rendered = LeakyProvider.explain_finding(&finding(), None).render();
+        assert!(!rendered.contains("ghp_"), "{rendered}");
+        assert!(!rendered.contains("/home/alice"), "{rendered}");
+        assert!(rendered.contains(REDACTED), "{rendered}");
+        assert!(rendered.contains(HOME), "{rendered}");
     }
 }

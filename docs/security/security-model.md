@@ -37,15 +37,23 @@ Scanned repositories are untrusted. The scanner:
 
 ## Network policy
 
-The default build performs **no network access**. If network-dependent features
-are introduced later (for example, optional AI assistance), they must:
+The default build performs **no network access**. The only network-capable code
+is the non-default `ai-http` feature, which provides the provider transport in
+`crates/soroban-scan-core/src/ai/http.rs`. It enforces:
 
-- Be explicitly opt-in and disabled by default.
-- Validate URLs and enforce an allowlist.
-- Enforce timeouts and response-size limits.
-- Protect against SSRF and unsafe redirects.
-- Fail closed on error.
-- Never send source code or secrets off-device without explicit, informed consent.
+- An explicit destination allowlist; there is no implicit allow-all mode.
+- HTTPS only, with embedded credentials rejected.
+- Connect and read timeouts plus a hard response-size limit.
+- Manual redirect handling; every redirect target is re-validated.
+- SSRF protection: loopback, private, link-local, carrier-grade NAT,
+  documentation, multicast, and metadata addresses are denied, including DNS
+  answers for allowlisted names.
+- Fail-closed behavior: no fallback transport and no partially validated request.
+- No source code or secrets are sent off-device without explicit, informed
+  consent.
+
+Network access is never enabled by a repository-provided configuration; it
+requires building the opt-in feature and naming an allowlisted provider.
 
 ## AI policy
 

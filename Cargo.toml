@@ -34,6 +34,10 @@ quote = "1"
 thiserror = "1"
 anyhow = "1"
 
+# Opt-in AI provider transport (never enabled by default)
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+url = "2"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 

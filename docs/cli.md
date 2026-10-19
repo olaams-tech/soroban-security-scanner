@@ -49,7 +49,8 @@ roots in one run.
 | `--guidance` | Print labeled offline guidance for findings (see [ai.md](ai.md)). |
 | `--quiet`, `-q` | Compact output; suppresses the header. |
 | `--verbose`, `-v` | Include diagnostics (see [diagnostics.md](diagnostics.md)). |
-| `--pager <auto\|never\|always>` | Page long terminal reports through `$PAGER` (default `auto`); never affects JSON/SARIF/Markdown. |
+| `--pager <auto\|never\|always>` | Page long terminal reports through `$PAGER` (default `auto`); never affects JSON/SARIF/Markdown/GitHub output. |
+| `--color <auto\|always\|never>` | Colorize terminal output (default `auto`). Machine formats never contain ANSI escapes. |
 
 ### Inline suppressions
 
@@ -111,8 +112,8 @@ terminal and reaches 64 KiB, `--pager auto` (the default) sends it through
 `$PAGER` (falling back to `less -R`, or `more` on Windows) so it can be scrolled
 and searched.
 
-- Paging never applies to `--format json`, `sarif`, or `markdown`; machine
-  output is always written verbatim.
+- Paging never applies to `--format json`, `sarif`, `markdown`, or `github`;
+  machine output is always written verbatim.
 - When stdout is **not** a terminal (a pipe or a redirect such as
   `soroban-scan scan . > report.txt`), nothing is paged — the full report is
   streamed to the pipe.
@@ -121,6 +122,31 @@ and searched.
 - If the pager cannot be launched, the report is written directly.
 - The threshold can be overridden with `SOROBAN_SCAN_PAGE_THRESHOLD` (bytes; `0`
   disables automatic paging).
+
+### Color output
+
+`--color auto` (the default) uses ANSI colors only when stdout is an
+interactive terminal and `NO_COLOR` is not set. `--color never` is useful for
+logs and snapshots; `--color always` is an explicit override for tools that
+preserve ANSI escapes.
+
+Colors apply only to the human-readable `terminal` format. JSON, SARIF,
+Markdown, and GitHub annotations never contain ANSI escapes, even when
+`--color always` is passed. When `--output <FILE>` is used, `auto` stays
+plain; `always` still colors terminal-format output written to the file.
+
+### GitHub Actions annotations
+
+`--format github` emits one workflow annotation per finding:
+
+```text
+::error file=src/lib.rs,line=42,title=SS-001%3A Missing authorization::SS-001: Missing authorization — storage write without require_auth
+```
+
+Severity maps to `error` (critical/high), `warning` (medium), or `notice`
+(low/info). Paths, titles, and evidence are escaped according to GitHub's
+workflow-command rules, so a crafted source path or finding cannot start a new
+command or break the workflow step. A finding produces exactly one line.
 
 ### Reading from stdin
 
@@ -240,7 +266,7 @@ network access.
 - **sarif** — SARIF 2.1.0 for GitHub code scanning and compatible tools.
 - **markdown** — report suitable for pull requests and documentation.
 - **github** — GitHub Actions workflow-command annotations (`::error`,
-  `::warning`, `::notice`).
+  `::warning`, `::notice`) with escaped paths, titles, and evidence.
 
 ## Severity and confidence
 

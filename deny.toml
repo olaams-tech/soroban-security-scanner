@@ -21,6 +21,9 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    # Mozilla's root certificate data, pulled in by webpki-roots for the
+    # opt-in ai-http transport.
+    "CDLA-Permissive-2.0",
     "ISC",
     "Unicode-3.0",
     "Unicode-DFS-2016",

@@ -112,6 +112,49 @@ must:
 - Never send source code or secrets off-device without explicit, informed
   user consent.
 
+The non-default `ai-http` feature provides the audited transport in
+`crates/soroban-scan-core/src/ai/http.rs`. It is absent from the default feature
+set:
+
+```toml
+# crates/soroban-scan-core/Cargo.toml
+[features]
+default = []
+ai-http = ["dep:ureq", "dep:url"]
+```
+
+A provider builds a [`NetworkPolicy`](../crates/soroban-scan-core/src/ai/http.rs)
+with an explicit allowlist (bare host names with optional ports, for example
+`api.example.com` or `*.example.com:443`) and hands it to `HttpClient`:
+
+```rust
+use soroban_scan_core::ai::http::{HttpClient, NetworkPolicy};
+use std::time::Duration;
+
+let policy = NetworkPolicy::new(["api.example.com"])?
+    .with_limits(
+        Duration::from_secs(5),   // connect
+        Duration::from_secs(15),  // read headers/body
+        1024 * 1024,              // hard response-size limit
+        3,                        // redirect budget
+    )?;
+let client = HttpClient::new(policy);
+let response = client.get("https://api.example.com/v1/respond")?;
+let body: serde_json::Value = response.json()?;
+```
+
+The client enforces HTTPS, rejects embedded credentials, re-validates every
+redirect target, resolves every destination and rejects loopback, private,
+link-local, carrier-grade NAT, documentation, multicast, and metadata addresses,
+and fails closed on malformed responses or non-2xx statuses. The allowlist
+itself is validated when the policy is built: empty or wildcard-only entries,
+private IPs, schemes, paths, and userinfo are rejected.
+
+Provider output is passed through the deterministic redaction pass in
+`ai::redact` before rendering. It removes common token formats, secret-like
+assignments, PEM private keys, and absolute home directories; `Explanation`
+applies the same pass again at render time as a final gate.
+
 ## What AI must never do
 
 - Invent findings or source locations.
